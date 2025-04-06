@@ -7,17 +7,18 @@ using System.IO;
 using System.Collections.Generic;
 using Renci.SshNet.Common;
 using TMPro;
-
+using System.Text.RegularExpressions;
 
 
 public class SshTerminal : MonoBehaviour
 {
-    public string host;
-    public string username;
-    public string password;
+    public TMP_InputField host;
+    public TMP_InputField username;
+    public TMP_InputField password;
     public TextMeshProUGUI outputText;
+    public ScrollRect scrollRect;
     // UI Text for terminal output
-    public InputField inputField;  // UI InputField for entering commands
+    public TMP_InputField inputField;  // UI InputField for entering commands
 
     private SshClient client;
     private ShellStream shell;
@@ -26,35 +27,48 @@ public class SshTerminal : MonoBehaviour
 
     void Start()
     {
-        // Connect in a background thread to avoid freezing
-        Debug.Log("SSH Terminal Starting...");
+        inputField.onEndEdit.AddListener(OnInputSubmitted);
+    }
+
+    // Called from the Connect button's OnClick event
+    public void OnConnectButtonPressed()
+    {
+        if (client != null && client.IsConnected)
+        {
+            Debug.Log("Disconnecting existing SSH session...");
+            Disconnect();
+        }
+
+        Debug.Log("Attempting SSH connection...");
         new Thread(() =>
         {
-            Debug.Log("SSH Thread Starting...");
-            client = new SshClient(host, username, password);
             try
             {
+                client = new SshClient(host.text.Trim(), username.text.Trim(), password.text);
                 client.Connect();
-                var modes = new Dictionary<TerminalModes, uint>();
-                modes[TerminalModes.ECHO] = 0;  // we handle echo manually
+
+                var modes = new Dictionary<TerminalModes, uint> { { TerminalModes.ECHO, 0 } };
                 shell = client.CreateShellStream("xterm", 80, 24, 800, 600, 1024, modes);
 
-                // Start reader thread
                 readThread = new Thread(ReadShellOutput) { IsBackground = true };
                 readThread.Start();
 
-                Debug.Log("SSH Thread Started");
+                lock (outputQueue)
+                {
+                    outputQueue.Enqueue($"\n[Connected to {host.text}]\n");
+                }
             }
             catch (System.Exception ex)
             {
-                lock (outputQueue) { outputQueue.Enqueue($"\n[Connection Error] {ex.Message}\n"); }
-                Debug.Log("SSH Thread Error: " + ex.Message);
+                lock (outputQueue)
+                {
+                    outputQueue.Enqueue($"\n[Connection Error] {ex.Message}\n");
+                }
+                Debug.LogError("SSH connection failed: " + ex);
             }
         }).Start();
-
-        // Setup InputField submit handler
-        inputField.onEndEdit.AddListener(OnInputSubmitted);
     }
+
 
     void ReadShellOutput()
     {
@@ -88,8 +102,41 @@ public class SshTerminal : MonoBehaviour
             lock (outputQueue) { outputQueue.Enqueue($"> {userInput}\n"); }
         }
         inputField.text = "";  // clear input field
-        inputField.ActivateInputField();  // focus back to input for next command
     }
+    void Disconnect()
+    {
+        try
+        {
+            shell?.Close();
+            client?.Disconnect();
+            client?.Dispose();
+            shell = null;
+            client = null;
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning("Error while disconnecting: " + ex.Message);
+        }
+
+        if (readThread != null && readThread.IsAlive)
+        {
+            readThread.Abort(); // Optional: use safer threading for production
+            readThread = null;
+        }
+
+        lock (outputQueue)
+        {
+            outputQueue.Enqueue("\n[Disconnected]\n");
+        }
+    }
+
+    private static string StripAnsiCodes(string input)
+    {
+        // Removes ANSI escape sequences like \x1B[31m or \u001b[0K
+        // return Regex.Replace(input, @"\x1B\[[0-9;]*[a-zA-Z]", "");
+        return Regex.Replace(input, @"\x1B\[[0-9;]*[mGKHF]", "");
+    }
+
 
     void Update()
     {
@@ -102,7 +149,11 @@ public class SshTerminal : MonoBehaviour
                 {
                     outputText.text += outputQueue.Dequeue();
                 }
-                // You might want to auto-scroll the ScrollRect here if needed
+                outputText.text = StripAnsiCodes(outputText.text);
+
+                // Autoscroll
+                Canvas.ForceUpdateCanvases();
+                scrollRect.verticalNormalizedPosition = 0f;
             }
         }
     }
